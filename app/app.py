@@ -1,4 +1,5 @@
 from flask import jsonify, request
+import requests
 from . import create_app
 
 app = create_app()
@@ -82,6 +83,63 @@ def delete_inventory_item(item_id):
 
     app.config["INVENTORY"] = [i for i in items if i["id"] != item_id]
     return ("", 204)
+
+# GET /inventory/search?barcode=... -> fetch product data from OpenFoodFacts
+@app.route("/inventory/search", methods=["GET"])
+def search_product():
+    barcode = request.args.get("barcode")
+    if not barcode:
+        return jsonify({"error": "Missing 'barcode' parameter"}), 400
+
+    url = f"https://world.openfoodfacts.net/api/v2/product/{barcode}.json"
+    try:
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        if data.get("status") != 1:
+            return jsonify({"error": "Product not found"}), 404
+
+        product = data["product"]
+        result = {
+            "barcode": barcode,
+            "product_name": product.get("product_name", "Unknown Product"),
+            "brands": product.get("brands", "Unknown Brand"),
+            "ingredients_text": product.get("ingredients_text", "N/A"),
+        }
+        return jsonify(result), 200
+    except requests.RequestException as e:
+        return jsonify({"error": f"Failed to fetch product data: {str(e)}"}), 500
+
+# POST /inventory/import -> fetch from OpenFoodFacts and add to local array
+@app.route("/inventory/import", methods=["POST"])
+def import_from_barcode():
+    payload = request.get_json() or {}
+    barcode = str(payload.get("barcode", "")).strip()
+    if not barcode:
+        return jsonify({"error": "Missing 'barcode' in body"}), 400
+
+    url = f"https://world.openfoodfacts.net/api/v2/product/{barcode}.json"
+    try:
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        if data.get("status") != 1:
+            return jsonify({"error": "Product not found"}), 404
+
+        product = data["product"]
+        items = app.config["INVENTORY"]
+        new_item = {
+            "id": _next_id(items),
+            "barcode": barcode,
+            "product_name": product.get("product_name", "Unknown Product"),
+            "brands": product.get("brands", "Unknown Brand"),
+            "ingredients_text": product.get("ingredients_text", "N/A"),
+            # allow caller to set price/stock when importing
+            "price": float(payload.get("price", 0)),
+            "stock": int(payload.get("stock", 0)),
+        }
+        items.append(new_item)
+        return jsonify(new_item), 201
+    except requests.RequestException as e:
+        return jsonify({"error": f"Failed to fetch product data: {str(e)}"}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
